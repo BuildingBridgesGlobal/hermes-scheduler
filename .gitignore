@@ -24,5 +24,8 @@ dist/
 .vitest/
 coverage/
 
+# TypeScript
+*.tsbuildinfo
+
 # Vercel
 .vercel/
