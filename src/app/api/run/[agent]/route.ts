@@ -64,6 +64,10 @@ export async function POST(
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const task = typeof body.task === "string" ? body.task : DAILY_TASK[agent] ?? "cycle";
+  const traceId =
+    typeof body.trace_id === "string" ? body.trace_id : crypto.randomUUID();
+  const runId =
+    typeof body.run_id === "string" ? body.run_id : crypto.randomUUID();
 
   try {
     const client = createHuviaClient({
@@ -75,12 +79,24 @@ export async function POST(
       agent,
       task,
       action_class: "A2_DRAFT_ONLY",
+      trace_id: traceId,
+      run_id: runId,
+      trigger_source: "vercel-cron",
     });
 
-    return NextResponse.json({ ok: true, result }, { status: 200 });
+    return NextResponse.json(
+      { ok: true, trace_id: traceId, run_id: runId, result },
+      { status: 200 }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[hermes-scheduler] Failed to run ${agent}: ${message}`);
-    return NextResponse.json({ ok: false, error: message }, { status: 502 });
+    console.error(
+      `[hermes-scheduler] Failed to run ${agent}: ${message}`,
+      { trace_id: traceId, run_id: runId }
+    );
+    return NextResponse.json(
+      { ok: false, trace_id: traceId, run_id: runId, error: message },
+      { status: 502 }
+    );
   }
 }
