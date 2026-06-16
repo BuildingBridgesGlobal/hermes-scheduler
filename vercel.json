@@ -1,0 +1,21 @@
+{
+  "framework": "nextjs",
+  "crons": [
+    {
+      "path": "/api/run/vigil",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/run/operator",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/run/rook",
+      "schedule": "0,30 * * * *"
+    },
+    {
+      "path": "/api/run/ceu_steward",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}
