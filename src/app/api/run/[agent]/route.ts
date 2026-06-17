@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createHuviaClient } from "@/lib/huvia-client";
 
@@ -7,6 +8,12 @@ import { createHuviaClient } from "@/lib/huvia-client";
 // Example cron config (vercel.json):
 //   "path": "/api/run/vigil",
 //   "schedule": "0,15,30,45 * * * *"
+
+const REQUIRED_ENV = [
+  "HUVIA_CORE_API_URL",
+  "HUVIA_API_KEY",
+  "CRON_SECRET",
+] as const;
 
 const AGENTS = new Set([
   "atlas",
@@ -34,18 +41,41 @@ const DAILY_TASK: Record<string, string> = {
   slack: "deploy",
 };
 
-function getEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
+function getEnv(name: string): string | undefined {
+  return process.env[name];
 }
 
+function validateEnv(): { ok: true } | { ok: false; missing: string[] } {
+  const missing = REQUIRED_ENV.filter((name) => !getEnv(name));
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+  return { ok: true };
+}
+
+/**
+ * Constant-time comparison of the Authorization header against the expected
+ * bearer token to avoid timing side-channels.
+ */
 function verifyCronAuth(req: NextRequest): boolean {
+  const cronSecret = getEnv("CRON_SECRET");
+  if (!cronSecret) {
+    console.error("[hermes-scheduler] CRON_SECRET is not configured");
+    return false;
+  }
+
   const authHeader = req.headers.get("authorization") ?? "";
-  const expected = `Bearer ${getEnv("CRON_SECRET")}`;
-  return authHeader === expected;
+  const expected = `Bearer ${cronSecret}`;
+
+  if (authHeader.length !== expected.length) {
+    return false;
+  }
+
+  try {
+    return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected));
+  } catch {
+    return false;
+  }
 }
 
 export async function POST(
@@ -56,6 +86,13 @@ export async function POST(
 
   if (!verifyCronAuth(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const envCheck = validateEnv();
+  if (!envCheck.ok) {
+    const message = `Missing required environment variables: ${envCheck.missing.join(", ")}`;
+    console.error(`[hermes-scheduler] ${message}`);
+    return NextResponse.json({ error: message }, { status: 503 });
   }
 
   if (!AGENTS.has(agent)) {
@@ -71,8 +108,10 @@ export async function POST(
 
   try {
     const client = createHuviaClient({
-      baseUrl: getEnv("HUVIA_CORE_API_URL"),
-      apiKey: getEnv("HUVIA_API_KEY"),
+      baseUrl: getEnv("HUVIA_CORE_API_URL")!,
+      apiKey: getEnv("HUVIA_API_KEY")!,
+      timeoutMs: 30_000,
+      retries: 2,
     });
 
     const result = await client.runAgent({

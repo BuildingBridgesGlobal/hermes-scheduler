@@ -32,9 +32,24 @@ export interface HuviaRunResponse {
 export interface HuviaClientConfig {
   baseUrl: string;
   apiKey: string;
+  /** Request timeout in milliseconds. Defaults to 30 seconds. */
+  timeoutMs?: number;
+  /** Number of retries for transient failures. Defaults to 0. */
+  retries?: number;
+}
+
+function isRetryable(status: number): boolean {
+  return status === 502 || status === 503 || status === 504 || status === 429 || status === 408;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function createHuviaClient(config: HuviaClientConfig) {
+  const timeoutMs = config.timeoutMs ?? 30_000;
+  const retries = config.retries ?? 0;
+
   async function runAgent(req: HuviaRunRequest): Promise<HuviaRunResponse> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -44,18 +59,50 @@ export function createHuviaClient(config: HuviaClientConfig) {
       headers["X-HUVIA-TRACE-ID"] = req.trace_id;
     }
 
-    const res = await fetch(`${config.baseUrl}/run`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(req),
-    });
+    let lastError: Error | undefined;
+    const maxAttempts = Math.max(1, retries + 1);
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`huvia-core returned ${res.status}: ${text}`);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(`${config.baseUrl}/run`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(req),
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          const error = new Error(`huvia-core returned ${res.status}: ${text}`);
+          if (isRetryable(res.status) && attempt < maxAttempts - 1) {
+            lastError = error;
+            await sleep(2 ** attempt * 500);
+            continue;
+          }
+          throw error;
+        }
+
+        return (await res.json()) as HuviaRunResponse;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (
+          (error.name === "AbortError" || error.message.includes("fetch")) &&
+          attempt < maxAttempts - 1
+        ) {
+          lastError = error;
+          await sleep(2 ** attempt * 500);
+          continue;
+        }
+        throw lastError ?? error;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
     }
 
-    return (await res.json()) as HuviaRunResponse;
+    throw lastError ?? new Error("huvia-core request failed");
   }
 
   return { runAgent };
